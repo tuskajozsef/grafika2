@@ -48,7 +48,6 @@
 //=============================================================================================
 #include "framework.h"
 
-// vertex shader in GLSL
 const char *vertexSource = R"(
 	#version 450
     precision highp float;
@@ -63,7 +62,7 @@ const char *vertexSource = R"(
 		p = wLookAt + wRight * cCamWindowVertex.x + wUp * cCamWindowVertex.y;
 	}
 )";
-// fragment shader in GLSL
+
 const char *fragmentSource = R"(
 	#version 450
     precision highp float;
@@ -83,6 +82,7 @@ const char *fragmentSource = R"(
 	struct Sphere {
 		vec3 center, scale;
 		float radius;
+		int mat;
 	};
 
 	struct Mirror{
@@ -90,6 +90,7 @@ const char *fragmentSource = R"(
 		vec3 p2;
 		vec3 p3;
 		vec3 p4;
+		int mat;
 	};
 
 	struct Hit {
@@ -102,12 +103,12 @@ const char *fragmentSource = R"(
 		vec3 start, dir;
 	};
 
-	const int nMaxObjects = 100;
+	const int nMaxObjects = 3;
 	const int nMaxMirrors = 150;
 
 	uniform vec3 wEye; 
 	uniform Light light;     
-	uniform Material materials[2];  // diffuse, specular, ambient ref
+	uniform Material materials[10];  // diffuse, specular, ambient ref
 	uniform int nObjects;
 	uniform int nMirrors;
 	uniform Mirror mirrors[nMaxMirrors];
@@ -135,7 +136,7 @@ const char *fragmentSource = R"(
 		hit.t = (t2 > 0) ? t2 : t1;
 		hit.position = ray.start*scale + ray.dir * hit.t*scale;
 		hit.normal = normalize(hit.position - object.center*scale);
-		hit.mat = 0;
+		hit.mat = object.mat;
 		return hit;
 	}
 
@@ -164,10 +165,10 @@ const char *fragmentSource = R"(
 		hit.position=p;
 		hit.t=t;
 		hit.normal=n;
-		hit.mat=1;
+		hit.mat= mirror.mat;
 	
 		return hit;
-};
+}
 
 	Hit firstIntersect(Ray ray) {
 		Hit bestHit;
@@ -192,7 +193,7 @@ const char *fragmentSource = R"(
 	bool shadowIntersect(Ray ray) {	// for directional lights
 		bool shadow = false;
 		for (int o = 0; o < nObjects; o++) if (intersect(objects[o], ray).t > 0) shadow = true;  //  hit.t < 0 if no intersection
-		for (int o = 0; o < nMirrors; o++) if (intersect(mirrors[o], ray).t > 0) shadow = true; //  hit.t < 0 if no intersection
+		//for (int o = 0; o < nMirrors; o++) if (intersect(mirrors[o], ray).t > 0) shadow = true; //  hit.t < 0 if no intersection
 		return shadow;
 	}
 
@@ -201,7 +202,7 @@ const char *fragmentSource = R"(
 	}
 
 	const float epsilon = 0.0001f;
-	const int maxdepth = 50;
+	const int maxdepth = 40;
 
 	vec3 trace(Ray ray) {
 		vec3 weight = vec3(1, 1, 1);
@@ -306,8 +307,9 @@ public:
 struct Sphere {
 	vec3 center, scale;
 	float radius;
+	int mat;
 
-	Sphere(const vec3& _center, const vec3& _scale, float _radius) { center = _center; scale = _scale; radius = _radius; }
+	Sphere(const vec3& _center, const vec3& _scale, float _radius,const int _mat) { center = _center; scale = _scale; radius = _radius; mat = _mat; }
 	void SetUniform(unsigned int shaderProg, int o) {
 		char buffer[256];
 		sprintf(buffer, "objects[%d].center", o);
@@ -319,17 +321,23 @@ struct Sphere {
 		sprintf(buffer, "objects[%d].radius", o);
 		int location = glGetUniformLocation(shaderProg, buffer);
 		if (location >= 0) glUniform1f(location, radius); else printf("uniform %s cannot be set\n", buffer);
+
+		sprintf(buffer, "objects[%d].mat", o);
+		location = glGetUniformLocation(shaderProg, buffer);
+		if (location >= 0) glUniform1i(location, mat); else printf("uniform %s cannot be set\n", buffer);
 	}
 };
 
 struct Mirror {
 	vec3 p1, p2, p3, p4;
+	int mat;
 
-	Mirror(const vec3& _p1,const vec3& _p2, const vec3& _p3, const vec3& _p4) {
+	Mirror(const vec3& _p1,const vec3& _p2, const vec3& _p3, const vec3& _p4, int _mat) {
 		p1 = _p1;
 		p2 = _p2;
 		p3 = _p3;
 		p4 = _p4;
+		mat = _mat;
 	}
 
 	void SetUniform(unsigned int shaderProg, int o) {
@@ -345,6 +353,10 @@ struct Mirror {
 
 		sprintf(buffer, "mirrors[%d].p4", o);
 		p4.SetUniform(shaderProg, buffer);
+
+		sprintf(buffer, "mirrors[%d].mat", o);
+		int location = glGetUniformLocation(shaderProg, buffer);
+		if (location >= 0) glUniform1i(location, mat); else printf("uniform %s cannot be set\n", buffer);
 	}
 };
 
@@ -401,7 +413,6 @@ struct Light {
 };
 
 
-
 float rnd() { return (float)rand() / RAND_MAX; }
 
 class Scene {
@@ -410,6 +421,7 @@ class Scene {
 	std::vector<Material *> materials;
 	std::vector<Mirror *> mirrors;
 	int nMirrors = 3;
+	bool dir = false;
 
 	Camera camera;
 public:
@@ -417,20 +429,23 @@ public:
 		vec3 eye = vec3(0, 0, 2);
 		vec3 vup = vec3(0, 1, 0);
 		vec3 lookat = vec3(0, 0, 0);
-		float fov = 150 * M_PI / 180;
+		float fov = 120 * M_PI / 180;
 		camera.set(eye, lookat, vup, fov);
 
-		lights.push_back(new Light(vec3(1, 1, 1), vec3(3, 3, 3), vec3(0.7, 0.7, 0.7)));
-		vec3 kd(1.0f, 0.2f, 0.1f), ks(10, 10, 10);
+		lights.push_back(new Light(vec3(0, 0, 0.5f), vec3(3, 3, 3), vec3(0.7, 0.7, 0.7)));
+		vec3 kd(1.0f, 0, 0), ks(20, 20, 20);
+		vec3 kd2(0, 1, 0);
+		vec3 kd3(0, 0, 1);
 
-		objects.push_back(new Sphere(vec3(0, 0, -2), vec3(0.1, 0.3, 0.4), 0.01));
-		objects.push_back(new Sphere(vec3(0.3, 0, -2), vec3(0.1, 0.3, 0.4), 0.01));
-		objects.push_back(new Sphere(vec3(-0.3, 0, -2), vec3(0.1, 0.3, 0.4), 0.01));
+		objects.push_back(new Sphere(vec3(0, 0, -2), vec3(0.1, 0.3, 0.4), 0.01, 0));
+		objects.push_back(new Sphere(vec3(0.3, 0, -2), vec3(0.1, 0.3, 0.4), 0.01, 1));
+		objects.push_back(new Sphere(vec3(-0.3, 0, -2), vec3(0.1, 0.3, 0.4), 0.01, 2));
 
 		BuildMirrors();
 
 		materials.push_back(new RoughMaterial(kd, ks, 50));
-		//materials.push_back(new SmoothMaterial(vec3(0.9, 0.85, 0.8)));
+		materials.push_back(new RoughMaterial(kd2, ks, 50));
+		materials.push_back(new RoughMaterial(kd3, ks, 50));
 		materials.push_back(new SmoothMaterial(vec3(0.9381f, 0.8464f, 0.3915f)));
 	}
 	void SetUniform(unsigned int shaderProg) {
@@ -438,7 +453,6 @@ public:
 		if (location >= 0) glUniform1i(location, objects.size()); else printf("uniform nObjects cannot be set\n");
 
 		location = glGetUniformLocation(shaderProg, "nMirrors");
-		printf("%d\n", mirrors.size());
 		if (location >= 0) glUniform1i(location, mirrors.size()); else printf("uniform nMirrors cannot be set\n");
 
 		for (int m = 0; m < mirrors.size(); m++) mirrors[m]->SetUniform(shaderProg, m);
@@ -455,26 +469,65 @@ public:
 		lights[0]->direction.x += dir.x; lights[0]->direction.y += dir.y; lights[0]->direction.z += dir.z;}
 
 	void BuildMirrors() {
-		printf("%d", nMirrors);
 		mirrors.clear();
 		for (int i = 0; i < nMirrors; i++) {
 			float angle = (float)i / nMirrors * 2 * M_PI;
 			float angle2 = (float)(i + 1) / nMirrors * 2 * M_PI;
-			mirrors.push_back(new Mirror(vec3(cosf(angle), sinf(angle), 2), vec3(cosf(angle), sinf(angle), -2), vec3(cosf(angle2), sinf(angle2), -2), vec3(cosf(angle2), sinf(angle2), 2)));
+			mirrors.push_back(new Mirror(vec3(cosf(angle), sinf(angle), 5), vec3(cosf(angle), sinf(angle), -2), vec3(cosf(angle2), sinf(angle2), -2), vec3(cosf(angle2), sinf(angle2), 5), 3));
 		}
 	}
 
-	void Zoom() {
-		camera.Zoom();
+	void IncreaseMirrors(int i) {
+		if(nMirrors<150)
+		nMirrors = nMirrors + i;
 	}
 
-	void MoveCamera(vec3 dir) {
-		camera.Move(dir);
-	}
+	void MoveEllipsoids() {
+		for (int i = 0; i < objects.size(); i++) {
+			/*if (sqrtf((0 - objects[i]->center.x)*(0 - objects[i]->center.x)* (0 - objects[i]->center.y)*(0 - objects[i]->center.y) *(0 - objects[i]->center.z)*(0 - objects[i]->center.z)) > 0.5f)
+				dir = !dir;
 
-	void IncreaseMirrors() {
-		nMirrors = nMirrors + 1;
-		printf("%d", nMirrors);
+			int random = rand();
+
+			if(dir){
+
+				if(random %3 ==0)
+					objects[i]->center.x += 0.01;
+
+				if (random % 3 == 1)
+					objects[i]->center.y += 0.01;
+
+				if (random % 3 == 2)
+					objects[i]->center.z += 0.01;
+
+			}
+
+			else {
+				if (random % 3 == 0)
+					objects[i]->center.x -= 0.01;
+
+				if (random % 3 == 1)
+					objects[i]->center.y -= 0.01;
+
+				if (random % 3 == 2)
+					objects[i]->center.z -= 0.01;
+			}*/
+
+
+			vec3 p1, p2, p3;
+			p1.x = (rnd() * 2 - 1) *0.6;
+			p1.y = (rnd() * 2 - 1) *0.6;
+			p1.z = 0;
+			
+			vec3 dir1 = p1 - objects[i]->center;
+
+			while (length(dir1)>0.01) {
+				objects[i]->center = objects[i]->center + dir1 * 0.00001f;
+				dir1 = p1 - objects[i]->center;
+				glutPostRedisplay();
+			}
+
+		}
 	}
 
 };
@@ -489,100 +542,76 @@ public:
 		glGenVertexArrays(1, &vao);	// create 1 vertex array object
 		glBindVertexArray(vao);		// make it active
 
-		unsigned int vbo;		// vertex buffer objects
-		glGenBuffers(1, &vbo);	// Generate 1 vertex buffer objects
+		unsigned int vbo;		
+		glGenBuffers(1, &vbo);	
 
-		// vertex coordinates: vbo0 -> Attrib Array 0 -> vertexPosition of the vertex shader
-		glBindBuffer(GL_ARRAY_BUFFER, vbo); // make it active, it is an array
-		float vertexCoords[] = { -1, -1,  1, -1,  1, 1,  -1, 1 };	// two triangles forming a quad
-		glBufferData(GL_ARRAY_BUFFER, sizeof(vertexCoords), vertexCoords, GL_STATIC_DRAW);	   // copy to that part of the memory which is not modified 
+		glBindBuffer(GL_ARRAY_BUFFER, vbo); 
+		float vertexCoords[] = { -1, -1,  1, -1,  1, 1,  -1, 1 };
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vertexCoords), vertexCoords, GL_STATIC_DRAW);	 
 		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);     // stride and offset: it is tightly packed
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);   
 	}
 
 	void Draw() {
-		glBindVertexArray(vao);	// make the vao and its vbos active playing the role of the data source
-		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);	// draw two triangles forming a quad
+		glBindVertexArray(vao);
+		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);	
 	}
 };
 
 FullScreenTexturedQuad fullScreenTexturedQuad;
 
-// Initialization, create an OpenGL context
 void onInitialization() {
 	glViewport(0, 0, windowWidth, windowHeight);
 	scene.build();
 	fullScreenTexturedQuad.Create();
 
-	// create program for the GPU
 	gpuProgram.Create(vertexSource, fragmentSource, "fragmentColor");
 	gpuProgram.Use();
 }
 
-// Window has become invalid: Redraw
 void onDisplay() {
 	static int nFrames = 0;
 	nFrames++;
 	static long tStart = glutGet(GLUT_ELAPSED_TIME);
 	long tEnd = glutGet(GLUT_ELAPSED_TIME);
-	//printf("%d msec\r", (tEnd - tStart) / nFrames);
 
-	glClearColor(0.1f, 0, 0.8f, 1.0f);							// background color 
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); // clear the screen
+	glClearColor(0.1f, 0, 0.8f, 1.0f);							
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); 
 	scene.SetUniform(gpuProgram.getId());
 	fullScreenTexturedQuad.Draw();
-	glutSwapBuffers();									// exchange the two buffers
+	glutSwapBuffers();									
 }
 
-// Key of ASCII code pressed
 void onKeyboard(unsigned char key, int pX, int pY) {
 	switch (key)
 	{
-	case 'a':  scene.IncreaseMirrors();
+	case 'a':  scene.IncreaseMirrors(1);
 		scene.BuildMirrors();
 		break;
 
-	case 'd': scene.MoveCamera(vec3(-0.1, 0, 0));
+	case 'd': scene.IncreaseMirrors(-1);
+		scene.BuildMirrors();
 		break;
 
-	case 'w': scene.MoveCamera(vec3(0, 0, 0.1));
-		break;
-
-	case 's': scene.MoveCamera(vec3(0, 0, -0.1));
-		break;
-
-	case 't': scene.MoveLights(vec3(0.1, 0, 0));
-		break;
-
-	case 'g': scene.MoveLights(vec3(-0.1, 0, 0));
-		break;
-
-	case 'f': scene.MoveLights(vec3(0, +0.1, 0));
-		break;
-
-	case 'h': scene.MoveLights(vec3(0, -0.1, 0));
-		break;
-
-	case 'z': scene.Zoom();
-		break;
 	}
 }
 
-// Key of ASCII code released
 void onKeyboardUp(unsigned char key, int pX, int pY) {
 
 }
 
-// Mouse click event
 void onMouse(int button, int state, int pX, int pY) {
 }
 
-// Move mouse with key pressed
 void onMouseMotion(int pX, int pY) {
 }
 
-// Idle event indicating that some time elapsed: do animation here
 void onIdle() {
-	//scene.Animate(0.01);
-	glutPostRedisplay();
+	static float count = 0;
+	count++;
+	if (count == 5000) {
+		scene.MoveEllipsoids();
+		count = 0;
+	}
+	
 }
